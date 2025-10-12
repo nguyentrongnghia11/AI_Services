@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pika
+transformers
+torch
+sentencepiece

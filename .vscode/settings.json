@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "D:\\ProjectPersonal\\Social_Website\\ai_services\\app\\.venv\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": [
+    "D:\\ProjectPersonal\\Social_Website\\ai_services\\app\\.venv\\Lib\\site-packages"
+  ]
+}
