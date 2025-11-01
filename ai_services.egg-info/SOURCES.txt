@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+ai_services.egg-info/PKG-INFO
+ai_services.egg-info/SOURCES.txt
+ai_services.egg-info/dependency_links.txt
+ai_services.egg-info/requires.txt
+ai_services.egg-info/top_level.txt
+app/consumer.py
+app/main.py
+app/database/connectMongodb.py
+app/database/connectRabbitmq.py
+app/services/encode_post_service.py
+app/services/hint_post_services.py
+app/services/toxic_detector_service.py
+app/utils/model_loader.py
+app/utils/untils.py

@@ -1,3 +1,24 @@
+Metadata-Version: 2.4
+Name: ai-services
+Version: 0.1.0
+Summary: AI Services for Social Website - Async workers with RabbitMQ and MongoDB
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi==0.109.0
+Requires-Dist: uvicorn==0.23.0
+Requires-Dist: aio-pika==9.4.0
+Requires-Dist: transformers==4.36.0
+Requires-Dist: torch>=2.5.0
+Requires-Dist: sentencepiece==0.1.99
+Requires-Dist: sentence-transformers==2.2.2
+Requires-Dist: motor==3.3.2
+Requires-Dist: python-dotenv==1.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+
 # AI Services - Social Website
 
 Async AI worker services for processing posts, detecting toxic content, and generating embeddings using RabbitMQ and MongoDB.

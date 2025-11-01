@@ -3,9 +3,9 @@ from .services.toxic_detector_service import ToxicDetector
 from .services.hint_post_services import get_list_homologous
 from .services.encode_post_service import encode_post_content
 from .database.connectMongodb import get_database
-import pika
+import aio_pika
 import json
-import time
+import asyncio
 import os
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
@@ -24,136 +24,187 @@ INPUT_EXCHANGE3 = "encode-post-exchange"
 INPUT_QUEUE3 = "encode-post-queue"
 RESULT_QUEUE3 = "result-encode-post-queue"
 
-def setup_exchange_and_queue(channel, input_exchange, input_queue, result_queue):
-    channel.exchange_declare(exchange=input_exchange, exchange_type='direct', durable=True)
-    channel.queue_declare(queue=input_queue, durable=True)
-    channel.queue_declare(queue=result_queue, durable=True)
+async def setup_exchange_and_queue(channel, input_exchange, input_queue, result_queue):
+    """Thiết lập Exchange, Input Queue và Binding."""
+    exchange = await channel.declare_exchange(
+        input_exchange, 
+        aio_pika.ExchangeType.DIRECT, 
+        durable=True
+    )
     
-    channel.queue_bind(exchange=input_exchange, queue=input_queue, routing_key=input_queue)
-    channel.queue_bind(exchange=input_exchange, queue=result_queue, routing_key=result_queue)
+    input_q = await channel.declare_queue(input_queue, durable=True)
+    result_q = await channel.declare_queue(result_queue, durable=True)
+    
+    await input_q.bind(exchange, routing_key=input_queue)
+    await result_q.bind(exchange, routing_key=result_queue)
+    
+    return exchange, input_q, result_q
 
 
-def detectToxicConsumer(stop_event):
+async def detectToxicConsumer(stop_event):
+    """Worker phát hiện ngôn ngữ thù địch (Toxic Detector) - Async version."""
     try:
-        connection = get_rabbitmq_connection()
-        channel = connection.channel()
+        connection = await get_rabbitmq_connection()
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=1)
         
-        setup_exchange_and_queue(channel, INPUT_EXCHANGE, INPUT_QUEUE, RESULT_QUEUE)
+        exchange, input_q, result_q = await setup_exchange_and_queue(
+            channel, INPUT_EXCHANGE, INPUT_QUEUE, RESULT_QUEUE
+        )
         
-        def callback(ch, method, properties, body):
-            try:
-                data = json.loads(body)
-                text = data.get("text", "")
-                print (text)
-                rs = ToxicDetector(input_text=text, prefix='hate-speech-detection')
-                print (rs)
-                response = json.dumps({"text": text, "result": rs})
-
-                channel.basic_publish(INPUT_EXCHANGE, RESULT_QUEUE, body=response)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                
-            except Exception as e:
-                print(f"!!! Error processing message (Toxic Detect): {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag)
-
-        channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(queue=INPUT_QUEUE, on_message_callback=callback)
+        async def callback(message: aio_pika.IncomingMessage):
+            async with message.process():
+                try:
+                    data = json.loads(message.body.decode())
+                    text = data.get("content", "")
+                    comment_id = data.get("_id") or data.get("commentId")
+                    print(f"[ToxicDetector] Processing comment {comment_id}: {text[:50]}...")
+                    
+                    rs = ToxicDetector(input_text=text, prefix='hate-speech-detection')
+                    print(f"[ToxicDetector] Result: {rs}")
+                    
+                    # Update database with the result
+                    if comment_id:
+                        try:
+                            dbs = await get_database()
+                            update_result = await dbs["comments"].update_one(
+                                {"_id": ObjectId(comment_id)},
+                                {"$set": {"isToxic": rs}}
+                            )
+                            print(f"[ToxicDetector] Updated isToxic={rs} for comment {comment_id}, matched: {update_result.matched_count}")
+                        except Exception as db_error:
+                            print(f"!!! Error updating database: {db_error}")
+                    
+                    response = json.dumps({
+                        "commentId": comment_id,
+                        "text": text, 
+                        "result": rs,
+                        "isToxic": rs
+                    })
+                    await exchange.publish(
+                        aio_pika.Message(body=response.encode()),
+                        routing_key=RESULT_QUEUE
+                    )
+                    
+                except Exception as e:
+                    print(f"!!! Error processing message (Toxic Detect): {e}")
+                    raise
+        
+        await input_q.consume(callback)
         
         print(f"Worker Toxic Detector [{INPUT_QUEUE}] đang chạy...")
-        while not stop_event.is_set():
-            connection.process_data_events(time_limit=1)
         
-        channel.close(); connection.close()
+        # Wait until stop event is set
+        while not stop_event.is_set():
+            await asyncio.sleep(1)
+        
         print("Worker Toxic Detector đã dừng hoàn toàn.")
 
     except Exception as e:
         print(f"Lỗi khởi động Toxic Worker: {e}")
 
 
-def hintPostConsumer(stop_event):
+async def hintPostConsumer(stop_event):
+    """Worker đề xuất bài viết (Hint Post) - Async version."""
     try:
-        connection = get_rabbitmq_connection()
-        channel = connection.channel()
+        connection = await get_rabbitmq_connection()
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=1)
         
-        setup_exchange_and_queue(channel, INPUT_EXCHANGE2, INPUT_QUEUE2, RESULT_QUEUE2)
+        exchange, input_q, result_q = await setup_exchange_and_queue(
+            channel, INPUT_EXCHANGE2, INPUT_QUEUE2, RESULT_QUEUE2
+        )
         
-        def callback(ch, method, properties, body):
-            try:
-                post_data = json.loads(body)
-                dbs = get_database()
-                list_posts = list(dbs["posts"].find({})) 
-                
-                homologous_posts = get_list_homologous(post=post_data, list_posts=list_posts)
-                response = json.dumps({"status": "success", "homologous_posts": homologous_posts})
-                
-                channel.basic_publish(exchange=INPUT_EXCHANGE2, routing_key=RESULT_QUEUE2, body=response)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                
-            except Exception as e:
-                print(f"!!! Error processing message (Hint Post): {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag)
-
-        channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(queue=INPUT_QUEUE2, on_message_callback=callback)
+        async def callback(message: aio_pika.IncomingMessage):
+            async with message.process():
+                try:
+                    post_data = json.loads(message.body.decode())
+                    dbs = await get_database()
+                    
+                    # Fetch all posts asynchronously
+                    cursor = dbs["posts"].find({})
+                    list_posts = await cursor.to_list(length=None)
+                    
+                    homologous_posts = get_list_homologous(post=post_data, list_posts=list_posts)
+                    response = json.dumps({"status": "success", "homologous_posts": homologous_posts})
+                    
+                    await exchange.publish(
+                        aio_pika.Message(body=response.encode()),
+                        routing_key=RESULT_QUEUE2
+                    )
+                    
+                except Exception as e:
+                    print(f"!!! Error processing message (Hint Post): {e}")
+                    raise
+        
+        await input_q.consume(callback)
         
         print(f"Worker Hint Post [{INPUT_QUEUE2}] đang chạy...")
-        while not stop_event.is_set():
-            connection.process_data_events(time_limit=1)
         
-        channel.close(); connection.close()
+        while not stop_event.is_set():
+            await asyncio.sleep(1)
+        
         print("Worker Hint Post đã dừng hoàn toàn.")
         
     except Exception as e:
         print(f"Lỗi khởi động Hint Post Worker: {e}")
         
 
-def encodePostConsumer(stop_event):
+async def encodePostConsumer(stop_event):
+    """Worker tạo vector nhúng (Embeddings) - Async version."""
     try:
-        connection = get_rabbitmq_connection()
-        channel = connection.channel()
+        connection = await get_rabbitmq_connection()
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=1)
         
-        setup_exchange_and_queue(channel, INPUT_EXCHANGE3, INPUT_QUEUE3, RESULT_QUEUE3)
+        exchange, input_q, result_q = await setup_exchange_and_queue(
+            channel, INPUT_EXCHANGE3, INPUT_QUEUE3, RESULT_QUEUE3
+        )
 
-        def callback(ch, method, properties, body):
-            try:
-                post = json.loads(body)
-            
-                content = post.get('content', '') 
-                post_id = post.get('_id')
+        async def callback(message: aio_pika.IncomingMessage):
+            async with message.process():
+                try:
+                    post = json.loads(message.body.decode())
                 
-                if not post_id or not content:
-                    print(f"Bỏ qua tin nhắn thiếu ID/Content: {post}")
-                    return ch.basic_ack(delivery_tag=method.delivery_tag)
+                    content = post.get('content', '') 
+                    post_id = post.get('_id')
+                    
+                    if not post_id or not content:
+                        print(f"Bỏ qua tin nhắn thiếu ID/Content: {post}")
+                        return
 
-                dbs = get_database()
-                embedding_tensor = encode_post_content(content=content) 
-                
-                embedding_list = embedding_tensor.tolist() 
-                print (embedding_list)
+                    dbs = await get_database()
+                    embedding_tensor = encode_post_content(content=content) 
+                    
+                    embedding_list = embedding_tensor.tolist() 
+                    print(f"[EncodePost] Generated embedding for post {post_id}")
 
-                result = dbs["posts"].find_one_and_update(
-                    {"_id": ObjectId(post_id)}, 
-                    {"$set": {"embedding": embedding_list}},
-                    upsert=True 
-                )
-                
-                print (result)
+                    result = await dbs["posts"].find_one_and_update(
+                        {"_id": ObjectId(post_id)}, 
+                        {"$set": {"embedding": embedding_list}},
+                        upsert=True 
+                    )
+                    
+                    print(f"[EncodePost] Updated: {result}")
 
-                channel.basic_publish(exchange=INPUT_EXCHANGE3, routing_key=RESULT_QUEUE3, body=json.dumps({"id": post_id, "status": "success"}))
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                
-            except Exception as e:
-                print(f"!!! Lỗi xử lý Encode Post: {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag)
+                    await exchange.publish(
+                        aio_pika.Message(
+                            body=json.dumps({"id": post_id, "status": "success"}).encode()
+                        ),
+                        routing_key=RESULT_QUEUE3
+                    )
+                    
+                except Exception as e:
+                    print(f"!!! Lỗi xử lý Encode Post: {e}")
+                    raise
 
-        channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(queue=INPUT_QUEUE3, on_message_callback=callback)
+        await input_q.consume(callback)
 
         print(f"Worker Encode Post [{INPUT_QUEUE3}] đang chạy...")
+        
         while not stop_event.is_set():
-            connection.process_data_events(time_limit=1)
+            await asyncio.sleep(1)
 
-        channel.close(); connection.close()
         print("worker Encode Post đã dừng hoàn toàn.")
         
     except Exception as e:
